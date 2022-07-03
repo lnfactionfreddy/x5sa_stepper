@@ -7,7 +7,7 @@
 #include "../lib/pins_CHITU3D_common.h"
 
 #include "HardwareSerial.h"
-#include "Regexp.h"
+//#include "Regexp.h"
 
 #include "STM32FreeRTOS.h"
 #include <string.h> 
@@ -18,6 +18,7 @@
 #include "stm32f1xx_ll_dma.h"
 #include "stm32f1xx_hal_uart.h"
 #include "uart.h"
+static SemaphoreHandle_t bin_sem;     // Waits for parameter to be read
 
 
 Stepper M1(X_STEP_PIN, X_DIR_PIN), M2(Y_STEP_PIN,Y_DIR_PIN);   //STEP pin =  2, DIR pin = 3
@@ -38,11 +39,8 @@ typedef struct home
 struct home par_home={0,false,false};
 
 
-float_t STEPS_PER_MM=16*5.00;
-
-// put your main code here, to run repeatedly:
-constexpr int spr = 16*200;  // 3200 steps per revolution
-
+float_t STEPS_PER_MM=16*50.00;
+float_t HOME_STEPS_PER_MM=16*50.00;
 
 //SERIAL 
 HardwareSerial debug(USART1);
@@ -71,38 +69,83 @@ void SerialRead_task( void *pvParameters );
 void Command_task(void *pvParameters);
  
 void ENDSTOP_M1(){
-  if(par_home.initial_homing!=0)
+  debug.println("endstop_test");
+  if(par_home.initial_homing!=0){
      par_home.ENDSTOP_1=true;
     debug.println("endstop");
+    }
     
 }
 void ENDSTOP_M2(){
-    if(par_home.initial_homing!=0)
+    if(par_home.initial_homing!=0){
      par_home.ENDSTOP_2=true;
     debug.println("endstop");
+    }
 }
-void G1(char *letter,void *pvParameters){
+void G1(char *letter){
 
 }
-void G2(char *letter,void *pvParameters){
+void G2(char *letter){
 
 }
 int G28(void *pvParameters){
-    home_var data=*((home_var*)pvParameters);
-    data.initial_homing=1;
-    while (data.initial_homing==1)
+    xSemaphoreGive(bin_sem);
+    par_home.initial_homing=1;
+    while (par_home.initial_homing==1)
     {
-    data=*((home_var*)pvParameters);
-    if(data.ENDSTOP_1==true)
+    M1.setTargetRel((HOME_STEPS_PER_MM*10.00));
+    controller.moveAsync(M1);
+
+    xSemaphoreGive(bin_sem);
+    if(par_home.ENDSTOP_1==true)
     {
         debug.println("home true");
         controller.stop();
-        data.initial_homing=0;
+        par_home.ENDSTOP_1=false;
+        M1.setPosition(0);
+        M1.setTargetAbs(-(HOME_STEPS_PER_MM*5.00));
+        controller.move(M1);
+        while (1)
+        {
+          M1.setTargetRel((HOME_STEPS_PER_MM*5.00));
+          controller.moveAsync(M1);
+          xSemaphoreGive(bin_sem);
+         if(par_home.ENDSTOP_1==true){
+          controller.stop();
+          par_home.ENDSTOP_1=false;
+          break;
+         }
+        }
         
+        break;
     }
-
+    
     }
+    par_home.initial_homing=0;
     return 0;
+}
+void G(char *command, char *letter,void *pvParameters){
+    char zahl[2];
+    for( uint8_t i = 1 ; i<strlen(command) ; ++i){
+        zahl[i-1]=command[i];   
+    }
+    int command_zahl = atoi(zahl);
+    debug.println(command_zahl);
+    switch (command_zahl)
+    {
+    case 1:
+        G1(letter);
+        break;
+    case 2:
+        G2(letter);
+        break;
+    case 28:
+        debug.println("G28 Case function!!!");
+        G28(pvParameters);
+        break;
+    default:
+        break;
+    }
 }
 void INIT_PINS(){
   pinMode(X_STOP_PIN, INPUT_PULLUP);
@@ -139,7 +182,8 @@ void setup()
      ; /* code */
     }
     GCODE_RING_BUFFER  = xQueueCreate(50  , sizeof( struct data* ) );
-    
+    bin_sem = xSemaphoreCreateBinary();
+    /*
     xTaskCreate(
     Stepper_task
     ,  (const portCHAR *)"Stepper_task"   // A name just for humans
@@ -147,7 +191,7 @@ void setup()
     ,  NULL
     ,  2  
     ,  NULL );
-
+    */
   xTaskCreate(
     SerialRead_task
     ,  (const portCHAR *) "SerialRead_task"
@@ -170,36 +214,17 @@ void setup()
 
 void loop() 
 {  
-;
+  ;  
 }
-void G(char *command, char *letter, void *pvParameters){
-    char zahl[2];
-    for( int i = 1 ; i<strlen(command) ; ++i){
-        zahl[i-1]=command[i];   
-    }
-    int command_zahl = atoi(zahl);
-    debug.println(command_zahl);
-    switch (command_zahl)
-    {
-    case 1:
-        G1(letter,pvParameters);
-        break;
-    case 2:
-        G2(letter,pvParameters);
-        break;
-    case 28:
-        G28(pvParameters);
-        debug.println("G28 Case function!!!");
-        break;
-    default:
-        break;
-    }
-}
+
+
+
+
 void SerialRead_task(void *pvParameters)  // This is a task.
 {
   (void) pvParameters;
   struct      GCODE_DATA   *GCODE_DATA_NOW;
-  
+
 
   for(;;){
        if (debug.available() > 0) {
@@ -268,6 +293,7 @@ void SerialRead_task(void *pvParameters)  // This is a task.
     }
   }
 }
+/*
 void Stepper_task(void *pvParameters)  // This is a task.
 {
   (void) pvParameters;
@@ -294,19 +320,21 @@ void Stepper_task(void *pvParameters)  // This is a task.
 
   }
 }
-
+*/
 void Command_task(void *pvParameters)  // This is a task.
 {
     struct      GCODE_DATA   *GCODE_DATA_Received;
-    
+    //pinMode(X_STOP_PIN, INPUT_PULLUP);
+    //pinMode(Y_STOP_PIN, INPUT_PULLUP);
+    xSemaphoreGive(bin_sem);
+
     for(;;){
-      home_var test=*((home_var*)pvParameters);
+      //home_var test=*((home_var*)pvParameters);
         if ( GCODE_RING_BUFFER )
                 {
                     if ( uxQueueMessagesWaiting ( GCODE_RING_BUFFER ) )    
                     {
-                        if(xQueueReceive ( GCODE_RING_BUFFER , &(GCODE_DATA_Received) , 0 ));
-                        {
+                        if(xQueueReceive ( GCODE_RING_BUFFER , &(GCODE_DATA_Received) , 0 )){
                             char command[]=" ";
                             char letter[]=" ";
                             strcpy(command,GCODE_DATA_Received->command);
@@ -315,8 +343,8 @@ void Command_task(void *pvParameters)  // This is a task.
                             switch (command[0]){
                             case 'G':
                             debug.println("G");
-                            debug.println(test.ENDSTOP_1);
-                            G(command,letter,pvParameters);
+                            //debug.println(par_home.ENDSTOP_1);
+                            G(command,letter, pvParameters);
                             break;
 
                             case '$':
